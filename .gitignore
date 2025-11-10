@@ -1,0 +1,19 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Environment variables file
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# AutoGen cache
+.cache/
+
+# IDE/Editor specific files
+.vscode/
+.idea/
