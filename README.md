@@ -2,6 +2,34 @@
 
 本项目旨在探索使用 [Microsoft AutoGen](https://github.com/microsoft/autogen) 框架构建一个面向教育场景的多智能体（Multi-Agent）仿真平台。通过模拟不同的教学和讨论模式，为未来的教育应用提供原型和技术验证。
 
+---
+
+使用方法
+
+1. 启动一个虚拟环境，并安装依赖：
+
+    ```bash
+    python -m venv .venv  # 创建虚拟环境
+
+    .venv/Scripts/activate  # 激活虚拟环境
+
+    pip install -r requirements.txt  # 安装依赖
+    ```
+
+2. 运行示例：
+    - 中心化群聊模式：
+        ```bash
+        python test_manager_ver.py
+        ```
+    - 点对点对话模式：
+        ```bash
+        python test_p2p_ver.py
+        ```
+
+当前实现的效果
+
+
+
 目前，项目包含以下几种核心的智能体交互模式实现。
 
 ---
@@ -97,6 +125,8 @@
     - **技术路径**: 为每个智能体附加一个状态管理器，用于记录其关键学习成果、情绪状态或性格参数，并在 `system_message` 中动态更新。
 
 通过以上方向的努力，我们可以将这个项目从简单的对话模拟，逐步演进为一个能够真正仿真复杂教育场景、具备实际应用价值的强大平台。
+
+
 
 ## 更新项目记录
 |备注|时间|
