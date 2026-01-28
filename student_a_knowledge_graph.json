@@ -1,0 +1,301 @@
+{
+  "agent_name": "StudentA",
+  "created_at": "2025-12-28 22:42:22",
+  "last_updated": "2025-12-28 22:42:22",
+  "concepts": {
+    "牛顿第一定律": {
+      "name": "牛顿第一定律",
+      "mastery": 0.44999999999999996,
+      "connections": [
+        "惯性"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 2,
+      "examples": []
+    },
+    "惯性": {
+      "name": "惯性",
+      "mastery": 0.55,
+      "connections": [
+        "我觉得惯性",
+        "一定律和惯性",
+        "牛顿第一定律",
+        "这个好像"
+      ],
+      "misconceptions": [
+        "惯性是力"
+      ],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 3,
+      "examples": []
+    },
+    "这个好像": {
+      "name": "这个好像",
+      "mastery": 0.4,
+      "connections": [
+        "保持原来状态",
+        "惯性"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "保持原来状态": {
+      "name": "保持原来状态",
+      "mastery": 0.4,
+      "connections": [
+        "这个好像"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "摩擦力": {
+      "name": "摩擦力",
+      "mastery": 0.3,
+      "connections": [
+        "地面有摩擦力",
+        "动能",
+        "滑冰"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 3,
+      "examples": []
+    },
+    "滑冰": {
+      "name": "滑冰",
+      "mastery": 0.3,
+      "connections": [
+        "摩擦力"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "地面有摩擦力": {
+      "name": "地面有摩擦力",
+      "mastery": 0.3,
+      "connections": [
+        "摩擦力"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "我觉得惯性": {
+      "name": "我觉得惯性",
+      "mastery": 0.35,
+      "connections": [
+        "惯性"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "一定律和惯性": {
+      "name": "一定律和惯性",
+      "mastery": 0.4,
+      "connections": [
+        "惯性",
+        "相关"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "相关": {
+      "name": "相关",
+      "mastery": 0.4,
+      "connections": [
+        "一定律和惯性"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "动能": {
+      "name": "动能",
+      "mastery": 0.3,
+      "connections": [
+        "摩擦力",
+        "会抵消滑冰时"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    },
+    "会抵消滑冰时": {
+      "name": "会抵消滑冰时",
+      "mastery": 0.3,
+      "connections": [
+        "动能"
+      ],
+      "misconceptions": [],
+      "last_mentioned": "2025-12-28 22:42:22",
+      "confidence": 0.5,
+      "mention_count": 1,
+      "examples": []
+    }
+  },
+  "update_history": [
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "牛顿第一定律",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "惯性",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "这个好像",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "保持原来状态",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "惯性 <-> 这个好像",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "这个好像 <-> 保持原来状态",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "摩擦力",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "滑冰",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "摩擦力 <-> 滑冰",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "地面有摩擦力",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "摩擦力 <-> 地面有摩擦力",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "我觉得惯性",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "惯性 <-> 我觉得惯性",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_misconception",
+      "target": "惯性",
+      "description": "检测到误解: 惯性是力"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "一定律和惯性",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "相关",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "牛顿第一定律 <-> 惯性",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "惯性 <-> 一定律和惯性",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "一定律和惯性 <-> 相关",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "动能",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_concept",
+      "target": "会抵消滑冰时",
+      "description": "添加新概念，初始掌握度: 0.3"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "摩擦力 <-> 动能",
+      "description": "建立概念关联"
+    },
+    {
+      "timestamp": "2025-12-28 22:42:22",
+      "action": "add_connection",
+      "target": "动能 <-> 会抵消滑冰时",
+      "description": "建立概念关联"
+    }
+  ]
+}
