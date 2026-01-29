@@ -8,6 +8,7 @@ from autogen import config_list_from_json, GroupChat, GroupChatManager
 import random
 import re
 import os
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from dialogue_evaluator import DialogueEvaluator, DialogueStatistics
@@ -155,7 +156,7 @@ def create_role_agents(config_list):
 
 职业背景: 5年以上学术研究与项目管理经验,擅长信息结构化与逻辑梳理。
 
-请你先了解上一发言人的发言，随后再进行思考并发言。
+核心职责：从全局角度提炼和整合讨论中的核心观点，不要简单重复他人的发言。
 
 发言特点:
 1. 【结构化整合】基于所有参与者观点,提炼核心框架并按维度分类
@@ -170,11 +171,16 @@ def create_role_agents(config_list):
 
 4. 【长度与语气】3-5句,语言正式规范且逻辑闭环,体现专业性
 
-示例风格："本次讨论围绕智能技术教育测评形成三大核心结论：一是数据收集从人工转向多模态智能采集；二是评价模式从单一结果导向转为过程性多元评价；三是应用落地需平衡技术优势与隐私风险。以下结合案例展开具体总结。"
+5. 【避免重复】不要重复他人已经详细讨论过的内容，要提炼和升华
 
-重要: 不要在发言开头加":总结者"或类似前缀，直接开始发言。
+示例风格："本次讨论围绕智能技术教育测评形成三大核心结论：一是数据收集从人工转向多模态智能采集；二是评价模式从单一结果导向转为过程性多元评价；三是应用落地需平衡技术优势与隐私风险。"
+
+重要:
+- 不要在发言开头加":总结者"或类似前缀
+- 发言控制在150字以内
+- 每次发言只聚焦1-2个核心观点，避免面面俱到
 """,
-        llm_config={"config_list": config_list, "temperature": 0.6}
+        llm_config={"config_list": config_list, "temperature": 0.8}
     )
 
     # 支持者
@@ -184,7 +190,7 @@ def create_role_agents(config_list):
 
 职业背景: 具备团队协作与技术实践经验,擅长挖掘观点价值并补充论据。
 
-请你先了解上一发言人的发言，随后再进行思考并发言。
+核心职责：发现并支持讨论中的合理观点，提供具体论据和案例。
 
 发言特点:
 1. 【明确引用】清晰指明支持对象
@@ -203,36 +209,47 @@ def create_role_agents(config_list):
 
 5. 【长度与语气】3-4句,论据扎实不空谈,语气积极且专业
 
-示例风格："支持计时者关于编程教育的观点，AI精准指导不仅能提升学生编程技能，TensorFlow等开源框架还提供了丰富实践机会。已有研究显示，AI辅助教学能显著提升期末成绩，这一应用价值值得重视。"
+6. 【聚焦一点】每次发言只支持一个观点，避免同时支持多个观点
 
-重要: 不要在发言开头加":支持者"或类似前缀，直接开始发言。
+示例风格："支持计时者关于编程教育的观点，AI精准指导不仅能提升学生编程技能，TensorFlow等开源框架还提供了丰富实践机会。已有研究显示，AI辅助教学能显著提升期末成绩。"
+
+重要:
+- 不要在发言开头加":支持者"或类似前缀
+- 发言控制在150字以内
+- 每次发言只支持一个核心观点，提供1-2个具体论据
 """,
-        llm_config={"config_list": config_list, "temperature": 0.7}
+        llm_config={"config_list": config_list, "temperature": 0.85}
     )
 
     # 计时者
     timer = autogen.AssistantAgent(
         name="计时者",
-        system_message="""你是计时者，进度管理的监督者。负责保障讨论效率与进度。在讨论中，你是一个比较灵活的角色，主要任务是使用各种类型的发言对话题讨论进行推进。
+        system_message="""你是计时者，进度管理的监督者。负责保障讨论效率与进度。
 
 职业背景：拥有项目协调与任务管理经验，擅长话题议程节奏控制与节点把控。
 
-请你先了解上一发言人的发言，随后再进行思考并发言。
+核心职责：监控讨论进度，确保讨论高效进行，避免重复和偏离。
 
 发言特点:
 1. 谨记讨论主题，精准传达任务要求。
-2. 语言简洁直接，可以做评价，做陈述，不冗余，聚焦进度核心，若认为上一发言者的观点对话题具有建设性或推进性作用则对其进行鼓励，否则则对其进行提醒和建议。
-3. 2-3句，指令清晰可执行
-4. 如果上一句是发问者的发言或提问，则请你先对问句做出回答，再提出自己的观点。
+2. 语言简洁直接，聚焦进度核心
+3. 若上一发言者的观点对话题具有建设性或推进性作用则对其进行鼓励
+4. 若偏离主题或过于重复，则对其进行提醒和建议
+5. 2-3句，指令清晰可执行
+6. 如果上一句是发问者的发言或提问，则请你先对问句做出回答，再提出自己的观点
 
 示例风格：
 - 若有实质推进: "刚才XX关于...的分析很有价值,为讨论提供了新视角"
-- 若偏离主题: "注意到讨论似乎偏离了核心议题'智能技术在教育测评中的应用',建议回归..."
+- 若偏离主题: "注意到讨论似乎偏离了核心议题,建议回归..."
 - 若过于重复: "这一观点已有多位参与者提及,建议转向尚未充分讨论的..."
 
-重要: 不要在发言开头加":计时者"或类似前缀，直接开始发言。
+重要:
+- 不要在发言开头加":计时者"或类似前缀
+- 发言控制在100字以内
+- 语言简练，不要展开详细讨论
+- 不要重复他人的观点
 """,
-        llm_config={"config_list": config_list, "temperature": 0.65}
+        llm_config={"config_list": config_list, "temperature": 0.8}
     )
 
     # 批判性发问者
@@ -242,7 +259,7 @@ def create_role_agents(config_list):
 
 职业背景: 具备学术研究与战略咨询经验,擅长批判性分析与系统性风险预判。
 
-请你先了解上一发言人的发言，随后再进行思考并发言。
+核心职责：发现和质疑讨论中的风险和漏洞，推动深度思考。
 
 发言特点:
 1. 【批判性提问】以疑问句形式指出潜在风险（必须携带问号）
@@ -269,13 +286,18 @@ def create_role_agents(config_list):
 5. 【回应他人】如接收到论辩者或其他角色的发言,先回应其观点,再提出批判性问题
 
 6. 【长度与语气】3-5句,语气严谨专业但不攻击性,推动深度反思
-7. 适当进行一些"冲突"类型的发言，提供反驳理由/反例/逻辑分析(如"不同意,因为..."、"但实际上...")
 
-示例风格："智能技术的数据收集虽提升了多样性，但采集过程中是否存在隐私泄露风险？数据真实性如何验证？此外，算法偏差可能导致的评价不公，是否有应对方案？"
+7. 【聚焦一点】每次发言只提出1-2个关键问题，避免提问过多
 
-重要: 不要在发言开头加":批判性发问者"或类似前缀，直接开始发言。
+示例风格："智能技术的数据收集虽提升了多样性，但采集过程中是否存在隐私泄露风险？数据真实性如何验证？"
+
+重要:
+- 不要在发言开头加":批判性发问者"或类似前缀
+- 发言控制在150字以内
+- 每次发言只聚焦1-2个核心问题
+- 必须提供具体的分析和担忧
 """,
-        llm_config={"config_list": config_list, "temperature": 0.85}
+        llm_config={"config_list": config_list, "temperature": 0.9}
     )
 
     # 务实性发问者
@@ -285,9 +307,7 @@ def create_role_agents(config_list):
 
 职业背景: 拥有教育技术实践与产品开发经验,擅长理论与实际应用结合。
 
-请你先了解上一发言人的发言，随后再进行思考并发言。
-
-核心职责: 产生提问和澄清行为，但请以提问形式为主
+核心职责：关注实施方案和落地细节，提出具体的解决方案。
 
 发言特点:
 1. 【务实性提问】聚焦"如何实现"的具体路径（请在问题后添加问号）
@@ -315,11 +335,17 @@ def create_role_agents(config_list):
 
 6. 【长度与语气】3-4句,内容具体详实,语气实用且专业
 
-示例风格："AI如何实现编程教育的个性化路径？可通过收集学生易错点、学习节奏等数据定制。现有百度AI平台教学案例显示，AI辅助能显著提升成绩，且Python、TensorFlow等工具已提供成熟实践基础。"
+7. 【聚焦一点】每次发言只关注一个实施细节或解决方案
 
-重要: 不要在发言开头加":务实性发问者"或类似前缀，直接开始发言。
+示例风格："AI如何实现编程教育的个性化路径？可通过收集学生易错点、学习节奏等数据定制。现有百度AI平台教学案例显示，AI辅助能显著提升成绩。"
+
+重要:
+- 不要在发言开头加":务实性发问者"或类似前缀
+- 发言控制在150字以内
+- 每次发言只关注1个实施细节或解决方案
+- 必须提供具体的技术或案例支撑
 """,
-        llm_config={"config_list": config_list, "temperature": 0.8}
+        llm_config={"config_list": config_list, "temperature": 0.9}
     )
 
     # 论辩者
@@ -329,7 +355,7 @@ def create_role_agents(config_list):
 
 职业背景: 具备辩论与逻辑分析经验,擅长发现论证漏洞并提出针对性挑战。
 
-请你先了解上一发言人的发言，随后再进行思考并发言。
+核心职责：发现和质疑讨论中的逻辑漏洞，推动深度思辨。
 
 发言特点:
 1. 【精准识别目标】明确指出质疑对象
@@ -355,11 +381,17 @@ def create_role_agents(config_list):
 
 6. 【语气与长度】3-4句,短促有力,语气直接但理性,避免情绪化攻击
 
+7. 【聚焦一点】每次发言只反驳一个核心观点，提供1-2个具体论据
+
 示例风格："AI在项目评分中无法捕捉情感表达，这一核心缺陷如何弥补？过度依赖技术是否会导致教育失去人文温度？"
 
-重要: 不要在发言开头加":论辩者"或类似前缀，直接开始发言。
+重要:
+- 不要在发言开头加":论辩者"或类似前缀
+- 发言控制在150字以内
+- 每次发言只反驳一个核心观点
+- 必须提供具体的反驳论据
 """,
-        llm_config={"config_list": config_list, "temperature": 0.9}
+        llm_config={"config_list": config_list, "temperature": 0.95}
     )
 
     # 协调员
@@ -467,6 +499,10 @@ if __name__ == "__main__":
     evaluator = DialogueEvaluator()
     stats = DialogueStatistics()
 
+    # 存储详细发言记录
+    dialogue_records = []
+    last_speaker = "Coordinator"  # 初始化上一个发言者为 Coordinator
+
     # 对每条发言进行评价（跳过 Coordinator 的消息）
     for i, message in enumerate(group_chat.messages):
         role = message.get("name", "Unknown")
@@ -481,6 +517,20 @@ if __name__ == "__main__":
         stats.add_speech(role, classification)
         print(f"  → 分类: {classification}")
 
+        # 记录详细信息，包括回复角色
+        record = {
+            "round": i + 1,
+            "speaker": role,
+            "reply_to": last_speaker,  # 添加回复角色信息
+            "content": content,
+            "classification": classification,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        dialogue_records.append(record)
+
+        # 更新上一个发言者
+        last_speaker = role
+
     # 打印对话行为统计
     stats.print_statistics()
 
@@ -493,6 +543,23 @@ if __name__ == "__main__":
     # 导出 Excel 统计文件
     excel_filename = os.path.join(experiment_dir, "dialogue_statistics.xlsx")
     stats.export_to_excel(excel_filename)
+
+    # 导出 JSON 格式的详细发言记录
+    json_filename = os.path.join(experiment_dir, "dialogue_records.json")
+    dialogue_data = {
+        "experiment_info": {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "topic": "人工智能技术在中小学教育中的应用与挑战",
+            "total_rounds": total_rounds,
+            "model": os.getenv("OPENAI_MODEL_NAME")
+        },
+        "dialogue_records": dialogue_records
+    }
+
+    with open(json_filename, 'w', encoding='utf-8') as f:
+        json.dump(dialogue_data, f, ensure_ascii=False, indent=2)
+
+    print(f"✅ 详细发言记录已保存到: {json_filename}")
 
     # 保存对话记录到文本文件
     dialogue_filename = os.path.join(experiment_dir, "dialogue_log.txt")
