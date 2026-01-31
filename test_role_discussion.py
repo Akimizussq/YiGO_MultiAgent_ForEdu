@@ -9,7 +9,7 @@ import random
 import re
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from dialogue_evaluator import DialogueEvaluator, DialogueStatistics
 
@@ -24,23 +24,197 @@ config_list = [
 ]
 
 
+# --- 动态温度智能体 ---
+class DynamicTemperatureAgent(autogen.AssistantAgent):
+    """支持动态温度调整的智能体"""
+
+    def __init__(self, name, system_message, llm_config, **kwargs):
+        super().__init__(name=name, system_message=system_message, llm_config=llm_config, **kwargs)
+        self.base_temperature = llm_config.get("temperature", 0.8)
+
+        # 基础阶段温度（用于大多数角色）
+        self.stage_temperatures = {
+            "early": 0.9,   # 鼓励多样性和创新
+            "middle": 0.85, # 保持一定多样性但更聚焦
+            "late": 0.8     # 优化：提高后期温度至0.8，避免过度收敛
+        }
+
+        # 发问者和论辩者的差异化温度（保持更高的创造力）
+        self.questioner_temperatures = {
+            "early": 0.9,
+            "middle": 0.85,
+            "late": 0.85    # 发问者在后期保持0.85
+        }
+
+        # 当前是否使用差异化温度
+        self.use_differentiated_temp = False
+
+    def set_stage_temperature(self, stage):
+        """根据阶段设置温度"""
+        if self.use_differentiated_temp and stage in self.questioner_temperatures:
+            # 使用发问者/论辩者的差异化温度
+            new_temp = self.questioner_temperatures[stage]
+        elif stage in self.stage_temperatures:
+            # 使用基础温度
+            new_temp = self.stage_temperatures[stage]
+        else:
+            return
+
+        self.llm_config["temperature"] = new_temp
+        temp_type = "差异化" if self.use_differentiated_temp else "基础"
+        print(f"[温度调整] {self.name} 温度调整为 {new_temp}（{stage}期，{temp_type}温度）")
+
+    def set_differentiated_mode(self, enabled):
+        """设置是否使用差异化温度模式"""
+        self.use_differentiated_temp = enabled
+
+
 # --- 增强的 GroupChat ---
 class RoleDiscussionChat(GroupChat):
-    """多角色讨论系统"""
+    """多角色讨论系统 - 支持阶段性引导和动态调整"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.silence_count = {}
         self.interaction_matrix = {}
 
+        # 发言次数统计（用于强制轮换）
+        self.speech_count = {}
+        # 连续发言次数统计
+        self.consecutive_speech = {}
+        # 重复发言检测
+        self.off_topic_streak = {}
+
+        # 最小发言次数保障（总轮数 / 角色数 × 0.5）
+        self.min_speech_ratio = 0.5
+        # 后期强制轮换阈值（轮）
+        self.late_force_rotation_threshold = 5
+        # 最大连续发言次数
+        self.max_consecutive_speech = 3
+
+        # 阶段性配置
+        self.stage_weights = {
+            "early": {  # 前期（1-10轮）：问题探索与信息收集
+                "批判性发问者": 0.25,
+                "务实性发问者": 0.25,
+                "支持者": 0.20,
+                "总结者": 0.10,
+                "论辩者": 0.10,
+                "计时者": 0.10
+            },
+            "middle": {  # 中期（11-20轮）：深度讨论与观点碰撞
+                "批判性发问者": 0.20,
+                "务实性发问者": 0.20,
+                "论辩者": 0.25,
+                "支持者": 0.15,
+                "总结者": 0.10,
+                "计时者": 0.10
+            },
+            "late": {  # 后期（21-30轮）：整合与共识
+                "总结者": 0.30,
+                "支持者": 0.20,
+                "批判性发问者": 0.15,
+                "务实性发问者": 0.15,
+                "论辩者": 0.10,
+                "计时者": 0.10
+            }
+        }
+
+        # 阶段性系统提示
+        self.stage_prompts = {
+            "early": "【讨论前期】请先提出核心问题，明确讨论方向，提供背景信息和案例。",
+            "middle": "【讨论中期】现在进入深度讨论阶段，请提出不同观点和反驳，推动观点碰撞。",
+            "late": "【讨论后期】请开始整合观点，寻找共识点，进行最终总结和评价。"
+        }
+
+        # 互动模式
+        self.interaction_modes = {
+            "early": "divergent",  # 发散模式
+            "middle": "focused",   # 聚焦模式
+            "late": "convergent"   # 收敛模式
+        }
+
+        # 动态温度配置
+        self.stage_temperatures = {
+            "early": 0.9,   # 鼓励多样性和创新
+            "middle": 0.85, # 保持一定多样性但更聚焦
+            "late": 0.8     # 优化：提高后期温度至0.8，避免过度收敛
+        }
+
+        # 记忆窗口大小
+        self.memory_window_sizes = {
+            "early": 999,    # 保留完整历史
+            "middle": 15,    # 聚焦最近15轮
+            "late": 10       # 聚焦最近10轮
+        }
+
+        # 质量检测记录
+        self.quality_checks = {
+            "early": False,
+            "middle": False,
+            "late": False
+        }
+
     def select_speaker(self, last_speaker: autogen.Agent, selector: autogen.Agent):
-        """智能选择下一个发言人"""
+        """智能选择下一个发言人 - 支持阶段性引导和动态调整"""
         messages = self.messages
         agents = self.agents
+        current_round = len(messages)
 
-        if len(messages) <= 1:
-            # 第一轮：从总结者开始
-            return self._get_agent_by_name("总结者")
+        # === 阶段性引导和质量检测 ===
+        stage = self._get_current_stage(current_round)
+        stage_prompt = self._get_stage_prompt(current_round)
+
+        # 输出阶段信息
+        # 计算阶段切换点
+        if self.max_round % 3 == 0:
+            stage_size = self.max_round // 3
+            early_end = stage_size
+            middle_end = stage_size * 2
+        else:
+            early_size = self.max_round // 3
+            late_size = self.max_round // 3
+            middle_size = self.max_round - early_size - late_size
+            early_end = early_size
+            middle_end = early_size + middle_size
+
+        stage_switch_points = [1, early_end + 1, middle_end + 1]
+        if current_round in stage_switch_points:
+            print(f"\n{'='*70}")
+            print(f"【阶段切换】进入讨论{stage}期（第{current_round}轮）")
+            print(f"【阶段目标】{stage_prompt}")
+            print(f"【互动模式】{self._get_interaction_mode(current_round)}")
+            print(f"【温度参数】{self._get_stage_temperature(current_round)}")
+            print(f"【记忆窗口】{self._get_memory_window_size(current_round)}轮")
+            print(f"{'='*70}\n")
+
+            # 阶段切换时，更新所有智能体的温度
+            for agent in agents:
+                if isinstance(agent, DynamicTemperatureAgent):
+                    agent.set_stage_temperature(stage)
+
+        # 质量检测
+        if self._check_discussion_quality(current_round):
+            print(f"[质量检测] 已完成阶段质量检测\n")
+
+        # 干预检测
+        if self._should_trigger_intervention(current_round):
+            print(f"[干预建议] 建议计时者或总结者介入\n")
+
+        # === 强制轮换检查 ===
+        force_rotation = self._check_force_rotation(agents, last_speaker, current_round)
+        if force_rotation:
+            print(f"[强制轮换] 检测到角色参与度不足，强制选择: {force_rotation.name}")
+            self._update_speech_stats(force_rotation)
+            return force_rotation
+
+        # 第一轮：从总结者开始
+        if current_round <= 1:
+            first_speaker = self._get_agent_by_name("总结者")
+            if first_speaker:
+                print(f"[调度日志] [开始] 讨论开始，{first_speaker.name} 首先发言")
+                self._update_speech_stats(first_speaker)
+            return first_speaker
 
         last_message = messages[-1]
         last_content = last_message.get("content", "").strip()
@@ -61,67 +235,122 @@ class RoleDiscussionChat(GroupChat):
             else:
                 self.silence_count[agent.name] = self.silence_count.get(agent.name, 0) + 1
 
-        # === 核心调度逻辑 ===
+        # === 核心调度逻辑（结合阶段和互动模式） ===
+        interaction_mode = self._get_interaction_mode(current_round)
+        stage_weights = self._get_stage_weights(current_round)
+
+        eligible = [a for a in agents if a != last_speaker]
 
         # 规则1：检测发问者（批判性/务实性）的提问
         if last_speaker.name in ["批判性发问者", "务实性发问者"]:
             # 检测是否有问号
             if "?" in last_content or "？" in last_content:
-                # 优先让被质疑的角色回应，或者让支持者/论辩者回应
-                responders = [a for a in agents if a.name in ["支持者", "论辩者", "总结者", "计时者"]]
+                # 根据互动模式选择响应者
+                if interaction_mode == "divergent":
+                    # 发散模式：让更多角色参与
+                    responders = [a for a in eligible if a.name in ["支持者", "论辩者", "总结者", "计时者"]]
+                elif interaction_mode == "focused":
+                    # 聚焦模式：让论辩者和支持者回应
+                    responders = [a for a in eligible if a.name in ["论辩者", "支持者"]]
+                else:  # convergent
+                    # 收敛模式：让总结者和支持者回应
+                    responders = [a for a in eligible if a.name in ["总结者", "支持者", "计时者"]]
+
                 if responders:
-                    selected = random.choice(responders)
-                    print(f"[调度日志] 💬 发问者提问 → {selected.name} 回应")
+                    # 结合阶段权重选择
+                    selected = self._select_speaker_by_weights(responders, stage_weights)
+                    print(f"[调度日志] [提问] 发问者提问 -> {selected.name} 回应（{interaction_mode}模式）")
                     self._record_interaction(last_speaker.name, selected.name)
+                    self._update_speech_stats(selected)
                     return selected
 
         # 规则2：检测论辩者的反驳
         if last_speaker.name == "论辩者":
-            # 论辩者反驳后，让支持者或另一个发问者继续
-            responders = [a for a in agents if a.name in ["支持者", "批判性发问者", "务实性发问者"]]
+            # 根据互动模式选择响应者
+            if interaction_mode == "divergent":
+                responders = [a for a in eligible if a.name in ["支持者", "批判性发问者", "务实性发问者", "总结者"]]
+            elif interaction_mode == "focused":
+                responders = [a for a in eligible if a.name in ["支持者", "批判性发问者", "务实性发问者"]]
+            else:  # convergent
+                responders = [a for a in eligible if a.name in ["支持者", "总结者"]]
+
             if responders:
-                selected = random.choice(responders)
-                print(f"[调度日志] ⚔️ 论辩者反驳 → {selected.name}")
+                selected = self._select_speaker_by_weights(responders, stage_weights)
+                print(f"[调度日志] [反驳] 论辩者反驳 -> {selected.name}（{interaction_mode}模式）")
                 self._record_interaction(last_speaker.name, selected.name)
+                self._update_speech_stats(selected)
                 return selected
 
         # 规则3：检测支持者的支持
         if last_speaker.name == "支持者":
-            # 支持者发言后，让发问者或论辩者继续，推动讨论深入
-            responders = [a for a in agents if a.name in ["批判性发问者", "务实性发问者", "论辩者"]]
+            # 根据互动模式选择响应者
+            if interaction_mode == "divergent":
+                responders = [a for a in eligible if a.name in ["批判性发问者", "务实性发问者", "论辩者", "总结者"]]
+            elif interaction_mode == "focused":
+                responders = [a for a in eligible if a.name in ["批判性发问者", "务实性发问者", "论辩者"]]
+            else:  # convergent
+                responders = [a for a in eligible if a.name in ["总结者", "计时者"]]
+
             if responders:
-                selected = random.choice(responders)
-                print(f"[调度日志] 👍 支持者支持 → {selected.name}")
+                selected = self._select_speaker_by_weights(responders, stage_weights)
+                print(f"[调度日志] [支持] 支持者支持 -> {selected.name}（{interaction_mode}模式）")
                 self._record_interaction(last_speaker.name, selected.name)
+                self._update_speech_stats(selected)
                 return selected
 
         # 规则4：总结者发言后
         if last_speaker.name == "总结者":
-            # 总结者发言后，让发问者或计时者继续
-            responders = [a for a in agents if a.name in ["批判性发问者", "务实性发问者", "计时者"]]
+            # 根据互动模式选择响应者
+            if interaction_mode == "divergent":
+                responders = [a for a in eligible if a.name in ["批判性发问者", "务实性发问者", "计时者"]]
+            elif interaction_mode == "focused":
+                responders = [a for a in eligible if a.name in ["批判性发问者", "务实性发问者", "论辩者"]]
+            else:  # convergent
+                responders = [a for a in eligible if a.name in ["支持者", "计时者"]]
+
             if responders:
-                selected = random.choice(responders)
-                print(f"[调度日志] 📝 总结者总结 → {selected.name}")
+                selected = self._select_speaker_by_weights(responders, stage_weights)
+                print(f"[调度日志] [总结] 总结者总结 -> {selected.name}（{interaction_mode}模式）")
                 self._record_interaction(last_speaker.name, selected.name)
+                self._update_speech_stats(selected)
                 return selected
 
         # 规则5：计时者发言后
         if last_speaker.name == "计时者":
-            # 计时者发言后，随机选择一个角色继续
-            eligible = [a for a in agents if a != last_speaker]
-            if eligible:
+            # 根据互动模式选择响应者
+            if interaction_mode == "divergent":
                 # 优先选择沉默时间长的
                 selected = max(eligible, key=lambda a: self.silence_count.get(a.name, 0))
-                print(f"[调度日志] ⏱️ 计时者推进 → {selected.name}")
+            elif interaction_mode == "focused":
+                # 让发问者和论辩者继续
+                responders = [a for a in eligible if a.name in ["批判性发问者", "务实性发问者", "论辩者"]]
+                selected = self._select_speaker_by_weights(responders, stage_weights) if responders else max(eligible, key=lambda a: self.silence_count.get(a.name, 0))
+            else:  # convergent
+                # 让总结者和支持者继续
+                responders = [a for a in eligible if a.name in ["总结者", "支持者"]]
+                selected = self._select_speaker_by_weights(responders, stage_weights) if responders else max(eligible, key=lambda a: self.silence_count.get(a.name, 0))
+
+            if selected:
+                print(f"[调度日志] [计时] 计时者推进 -> {selected.name}（{interaction_mode}模式）")
                 self._record_interaction(last_speaker.name, selected.name)
+                self._update_speech_stats(selected)
                 return selected
 
-        # 默认策略：优先选择沉默时间长的角色
-        eligible = [a for a in agents if a != last_speaker]
+        # 默认策略：结合阶段权重和沉默时间
         if eligible:
-            selected = max(eligible, key=lambda a: self.silence_count.get(a.name, 0))
-            print(f"[调度日志] 🎲 默认选择: {selected.name}")
+            # 计算综合得分 = 权重 × (沉默时间 + 1)
+            scored_agents = []
+            for agent in eligible:
+                weight = stage_weights.get(agent.name, 1.0)
+                silence = self.silence_count.get(agent.name, 0) + 1
+                score = weight * silence
+                scored_agents.append((agent, score))
+
+            # 选择得分最高的
+            selected = max(scored_agents, key=lambda x: x[1])[0]
+            print(f"[调度日志] [默认] 选择: {selected.name}（权重: {stage_weights.get(selected.name, 1.0)}, 沉默: {self.silence_count.get(selected.name, 0)}轮）")
             self._record_interaction(last_speaker.name, selected.name)
+            self._update_speech_stats(selected)
             return selected
 
         return None
@@ -138,11 +367,230 @@ class RoleDiscussionChat(GroupChat):
                 return agent
         return None
 
-    def print_interaction_stats(self):
-        """打印互动统计"""
-        print("\n📊 角色互动统计：")
-        for (from_a, to_a), count in sorted(self.interaction_matrix.items()):
-            print(f"  {from_a} → {to_a}: {count}次")
+    def _update_speech_stats(self, selected_agent):
+        """更新发言统计"""
+        if selected_agent:
+            # 更新发言次数
+            self.speech_count[selected_agent.name] = self.speech_count.get(selected_agent.name, 0) + 1
+
+            # 更新连续发言次数
+            for agent_name in self.consecutive_speech:
+                if agent_name == selected_agent.name:
+                    self.consecutive_speech[agent_name] = self.consecutive_speech.get(agent_name, 0) + 1
+                else:
+                    self.consecutive_speech[agent_name] = 0
+
+            # 检测重复发言（非话题性）
+            last_message = self.messages[-1] if self.messages else {}
+            last_content = last_message.get("content", "").strip()
+            last_speaker = last_message.get("name", "")
+
+            # 简单的重复检测：如果内容很短且包含"感谢"等关键词
+            if len(last_content) < 50 and any(keyword in last_content for keyword in ["感谢", "谢谢", "期待", "保持"]):
+                self.off_topic_streak[last_speaker] = self.off_topic_streak.get(last_speaker, 0) + 1
+            else:
+                self.off_topic_streak[last_speaker] = 0
+
+    def _check_force_rotation(self, agents, last_speaker, current_round):
+        """检查是否需要强制轮换"""
+        # 计算最小发言次数
+        min_speech = int(self.max_round * self.min_speech_ratio / len(agents))
+
+        # 获取当前阶段
+        stage = self._get_current_stage(current_round)
+
+        # 检查未达到最小发言次数的角色
+        underrepresented = []
+        for agent in agents:
+            if agent != last_speaker:
+                speech_count = self.speech_count.get(agent.name, 0)
+                if speech_count < min_speech:
+                    underrepresented.append((agent, min_speech - speech_count))
+
+        # 如果有未达到最小发言次数的角色
+        if underrepresented:
+            # 按照缺少的发言次数排序
+            underrepresented.sort(key=lambda x: x[1], reverse=True)
+
+            # 在后期阶段，优先选择沉默时间最长的
+            if stage == "late":
+                for agent, _ in underrepresented:
+                    silence = self.silence_count.get(agent.name, 0)
+                    if silence >= self.late_force_rotation_threshold:
+                        return agent
+
+            # 否则，选择缺少发言次数最多的角色（给予2倍权重）
+            selected = underrepresented[0][0]
+            return selected
+
+        # 检查连续发言次数
+        for agent in agents:
+            if agent != last_speaker:
+                consecutive = self.consecutive_speech.get(agent.name, 0)
+                if consecutive >= self.max_consecutive_speech:
+                    # 强制选择其他角色
+                    eligible = [a for a in agents if a != agent and a != last_speaker]
+                    if eligible:
+                        return eligible[0]
+
+        # 检测重复发言触发
+        for agent in agents:
+            if agent != last_speaker:
+                off_topic_count = self.off_topic_streak.get(agent.name, 0)
+                if off_topic_count >= 3:
+                    # 临时提高该角色的温度
+                    if isinstance(agent, DynamicTemperatureAgent):
+                        current_temp = agent.llm_config.get("temperature", 0.8)
+                        new_temp = min(0.95, current_temp + 0.1)
+                        agent.llm_config["temperature"] = new_temp
+                        print(f"[重复检测] 检测到{agent.name}连续{off_topic_count}次非话题性发言，临时提高温度至{new_temp}")
+
+        return None
+
+    def _get_current_stage(self, current_round: int):
+        """获取当前讨论阶段（支持100轮的动态划分）"""
+        # 计算各阶段的轮数（如果除不开，中期多1轮）
+        if self.max_round % 3 == 0:
+            # 能被3整除，均分
+            stage_size = self.max_round // 3
+            early_end = stage_size
+            middle_end = stage_size * 2
+        else:
+            # 不能被3整除，中期多1轮
+            early_size = self.max_round // 3
+            late_size = self.max_round // 3
+            middle_size = self.max_round - early_size - late_size  # 中期多1轮
+
+            early_end = early_size
+            middle_end = early_size + middle_size
+
+        if current_round <= early_end:
+            return "early"
+        elif current_round <= middle_end:
+            return "middle"
+        else:
+            return "late"
+
+    def _get_stage_prompt(self, current_round: int):
+        """获取当前阶段的系统提示"""
+        stage = self._get_current_stage(current_round)
+        return self.stage_prompts.get(stage, "")
+
+    def _get_stage_weights(self, current_round: int):
+        """获取当前阶段的角色权重"""
+        stage = self._get_current_stage(current_round)
+        return self.stage_weights.get(stage, {})
+
+    def _get_stage_temperature(self, current_round: int):
+        """获取当前阶段的温度参数"""
+        stage = self._get_current_stage(current_round)
+        return self.stage_temperatures.get(stage, 0.8)
+
+    def _get_memory_window_size(self, current_round: int):
+        """获取当前阶段的记忆窗口大小"""
+        stage = self._get_current_stage(current_round)
+        return self.memory_window_sizes.get(stage, 999)
+
+    def _get_memory_window_messages(self, current_round: int):
+        """根据记忆窗口大小获取应该传递的消息"""
+        window_size = self._get_memory_window_size(current_round)
+
+        # 如果窗口大小大于等于消息总数，返回全部消息
+        if window_size >= len(self.messages):
+            return self.messages
+
+        # 否则，返回最近的消息（保留前2条消息作为上下文）
+        # 前2条通常是 Coordinator 的发起消息和第一条发言
+        if len(self.messages) > 2:
+            return self.messages[:2] + self.messages[-window_size:]
+        else:
+            return self.messages
+
+    def _get_interaction_mode(self, current_round: int):
+        """获取当前互动模式"""
+        stage = self._get_current_stage(current_round)
+        return self.interaction_modes.get(stage, "divergent")
+
+    def _check_discussion_quality(self, current_round: int):
+        """检测讨论质量（支持100轮的动态划分）"""
+        stage = self._get_current_stage(current_round)
+
+        # 计算阶段切换点
+        if self.max_round % 3 == 0:
+            stage_size = self.max_round // 3
+            early_end = stage_size
+            middle_end = stage_size * 2
+        else:
+            early_size = self.max_round // 3
+            late_size = self.max_round // 3
+            middle_size = self.max_round - early_size - late_size
+            early_end = early_size
+            middle_end = early_size + middle_size
+
+        # 在关键节点进行质量检测
+        if current_round == early_end and not self.quality_checks["early"]:
+            print(f"[质量检测] 前期讨论完成，检查是否明确了核心问题...")
+            self.quality_checks["early"] = True
+            return True
+        elif current_round == middle_end and not self.quality_checks["middle"]:
+            print(f"[质量检测] 中期讨论完成，检查是否产生了充分的观点碰撞...")
+            self.quality_checks["middle"] = True
+            return True
+        elif current_round == self.max_round and not self.quality_checks["late"]:
+            print(f"[质量检测] 后期讨论完成，检查是否达成了共识或明确了分歧...")
+            self.quality_checks["late"] = True
+            return True
+
+        return False
+
+    def _select_speaker_by_weights(self, eligible_agents, weights):
+        """根据权重选择发言人"""
+        if not eligible_agents:
+            return None
+
+        # 为每个代理人分配权重
+        agent_weights = []
+        total_weight = 0
+
+        for agent in eligible_agents:
+            weight = weights.get(agent.name, 1.0)
+            agent_weights.append((agent, weight))
+            total_weight += weight
+
+        # 随机选择
+        import random
+        r = random.uniform(0, total_weight)
+        cumulative_weight = 0
+
+        for agent, weight in agent_weights:
+            cumulative_weight += weight
+            if r <= cumulative_weight:
+                return agent
+
+        # 如果随机选择失败，返回第一个
+        return eligible_agents[0]
+
+    def _should_trigger_intervention(self, current_round: int):
+        """判断是否需要触发干预"""
+        stage = self._get_current_stage(current_round)
+
+        # 检查是否偏离主题（简单检测：重复发言过多）
+        if current_round > 5:
+            recent_messages = self.messages[-5:]
+            unique_speakers = set(msg.get("name") for msg in recent_messages)
+            if len(unique_speakers) < 3:  # 最近5轮只有少于3个不同发言人
+                print(f"[干预检测] 检测到发言过于集中，建议计时者介入")
+                return True
+
+        # 检查是否有未回应的问题
+        if stage in ["middle", "late"]:
+            for msg in self.messages[-3:]:
+                content = msg.get("content", "")
+                if "?" in content or "？" in content:
+                    print(f"[干预检测] 检测到未回应的问题，建议相关角色回应")
+                    return True
+
+        return False
 
 
 # --- 创建智能体 ---
@@ -150,7 +598,7 @@ def create_role_agents(config_list):
     """创建6种不同角色的智能体"""
 
     # 总结者
-    summarizer = autogen.AssistantAgent(
+    summarizer = DynamicTemperatureAgent(
         name="总结者",
         system_message="""你是总结者,全局视角的整合者。负责系统化整合讨论成果。
 
@@ -184,7 +632,7 @@ def create_role_agents(config_list):
     )
 
     # 支持者
-    supporter = autogen.AssistantAgent(
+    supporter = DynamicTemperatureAgent(
         name="支持者",
         system_message="""你是支持者,建设性观点的强化者。负责扩展和深化他人的合理观点。
 
@@ -222,7 +670,7 @@ def create_role_agents(config_list):
     )
 
     # 计时者
-    timer = autogen.AssistantAgent(
+    timer = DynamicTemperatureAgent(
         name="计时者",
         system_message="""你是计时者，进度管理的监督者。负责保障讨论效率与进度。
 
@@ -253,7 +701,7 @@ def create_role_agents(config_list):
     )
 
     # 批判性发问者
-    critical_questioner = autogen.AssistantAgent(
+    critical_questioner = DynamicTemperatureAgent(
         name="批判性发问者",
         system_message="""你是批判性发问者,风险预警与深度思辨的推动者。负责挖掘潜在问题与逻辑漏洞。
 
@@ -299,9 +747,11 @@ def create_role_agents(config_list):
 """,
         llm_config={"config_list": config_list, "temperature": 0.9}
     )
+    # 设置差异化温度模式
+    critical_questioner.set_differentiated_mode(True)
 
     # 务实性发问者
-    practical_questioner = autogen.AssistantAgent(
+    practical_questioner = DynamicTemperatureAgent(
         name="务实性发问者",
         system_message="""你是务实性发问者,应用导向的解决方案探索者。负责聚焦落地路径与实践细节。
 
@@ -347,9 +797,11 @@ def create_role_agents(config_list):
 """,
         llm_config={"config_list": config_list, "temperature": 0.9}
     )
+    # 设置差异化温度模式
+    practical_questioner.set_differentiated_mode(True)
 
     # 论辩者
-    debater = autogen.AssistantAgent(
+    debater = DynamicTemperatureAgent(
         name="论辩者",
         system_message="""你是论辩者,逻辑严密的观点挑战者。负责强化论证严谨性与推动深度思辨。
 
@@ -393,17 +845,599 @@ def create_role_agents(config_list):
 """,
         llm_config={"config_list": config_list, "temperature": 0.95}
     )
+    # 设置差异化温度模式
+    debater.set_differentiated_mode(True)
 
-    # 协调员
+    # 协调员（只负责发起话题，不参与讨论）
     coordinator = autogen.UserProxyAgent(
         name="Coordinator",
         human_input_mode="NEVER",
         code_execution_config=False,
         is_termination_msg=lambda x: False,  # 不自动终止
-        max_consecutive_auto_reply=1,
+        max_consecutive_auto_reply=0,  # 设置为 0，确保 Coordinator 发起后不再回复
     )
 
     return summarizer, supporter, timer, critical_questioner, practical_questioner, debater, coordinator
+
+
+
+
+
+# === 数据分析函数 ===
+
+def analyze_speech_statistics(group_chat, agents):
+    """分析发言统计"""
+    total_rounds = len(group_chat.messages)
+    speech_stats = []
+
+    for agent in agents:
+        count = sum(1 for m in group_chat.messages if m.get("name") == agent.name)
+        percentage = (count / total_rounds * 100) if total_rounds > 0 else 0
+        speech_stats.append({
+            "角色": agent.name,
+            "发言次数": count,
+            "占比(%)": round(percentage, 1)
+        })
+
+    return speech_stats, total_rounds
+
+
+def analyze_interaction_statistics(group_chat):
+    """分析互动统计"""
+    interaction_stats = []
+    total_interactions = sum(group_chat.interaction_matrix.values())
+
+    for (from_a, to_a), count in sorted(group_chat.interaction_matrix.items()):
+        interaction_stats.append({
+            "发起者": from_a,
+            "接收者": to_a,
+            "互动次数": count
+        })
+
+    return interaction_stats, total_interactions
+
+
+def analyze_dialogue_behavior(group_chat, evaluator):
+    """分析对话行为（不打印）"""
+    stats = DialogueStatistics()
+    dialogue_records = []
+    last_speaker = "Coordinator"
+
+    # 生成递增的时间戳（模拟真实时间流逝）
+    base_time = datetime.now()
+    time_increment = timedelta(seconds=5)  # 每条消息间隔5秒
+
+    for i, message in enumerate(group_chat.messages):
+        role = message.get("name", "Unknown")
+        content = message.get("content", "")
+
+        if role == "Coordinator":
+            continue
+
+        classification = evaluator.evaluate(content)
+        stats.add_speech(role, classification)
+
+        # 生成递增的时间戳
+        current_time = base_time + (i * time_increment)
+        timestamp = current_time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]  # ISO格式，毫秒精度
+
+        record = {
+            "round": i + 1,
+            "speaker": role,
+            "reply_to": last_speaker,
+            "content": content,
+            "classification": classification,
+            "timestamp": timestamp
+        }
+        dialogue_records.append(record)
+        last_speaker = role
+
+    return stats, dialogue_records
+
+
+def analyze_network_centrality(group_chat, agents):
+    """分析网络中心性（入度、出度、度中心性）"""
+    import pandas as pd
+
+    # 构建邻接矩阵
+    agent_names = [agent.name for agent in agents]
+    n = len(agent_names)
+
+    # 初始化矩阵
+    adjacency_matrix = pd.DataFrame(0, index=agent_names, columns=agent_names)
+
+    # 填充邻接矩阵
+    for (from_a, to_a), count in group_chat.interaction_matrix.items():
+        if from_a in agent_names and to_a in agent_names:
+            adjacency_matrix.loc[from_a, to_a] = count
+
+    # 计算入度、出度、总度
+    in_degree = adjacency_matrix.sum(axis=0)  # 列和（被指向）
+    out_degree = adjacency_matrix.sum(axis=1)  # 行和（指向他人）
+    total_degree = in_degree + out_degree
+
+    # 计算每个角色的发言次数
+    speech_count = {}
+    for agent in agents:
+        count = sum(1 for m in group_chat.messages if m.get("name") == agent.name)
+        speech_count[agent.name] = count
+
+    # 计算平均入度、平均出度（出入度/发言次数）
+    avg_in_degree = {}
+    avg_out_degree = {}
+    for name in agent_names:
+        if speech_count[name] > 0:
+            avg_in_degree[name] = round(in_degree[name] / speech_count[name], 3)
+            avg_out_degree[name] = round(out_degree[name] / speech_count[name], 3)
+        else:
+            avg_in_degree[name] = 0
+            avg_out_degree[name] = 0
+
+    # 计算度中心性（归一化）
+    max_possible_degree = (n - 1) * 2  # 最大可能的度数（n-1个其他节点 × 2方向）
+    degree_centrality = total_degree / max_possible_degree if max_possible_degree > 0 else 0
+
+    # 计算接近中心性（简化的反向距离）
+    # 使用 1/(距离+1) 作为接近性度量
+    proximity_scores = {}
+    for agent in agent_names:
+        total_distance = 0
+        connections = 0
+        for other in agent_names:
+            if agent != other:
+                if adjacency_matrix.loc[agent, other] > 0 or adjacency_matrix.loc[other, agent] > 0:
+                    # 有直接连接，距离为1
+                    total_distance += 1
+                    connections += 1
+                else:
+                    # 无直接连接，距离为无穷大（用n代替）
+                    total_distance += n
+
+        if connections > 0:
+            proximity_scores[agent] = connections / total_distance
+        else:
+            proximity_scores[agent] = 0
+
+    # 计算介数中心性（简化的路径计数）
+    betweenness = {name: 0 for name in agent_names}
+    for source in agent_names:
+        for target in agent_names:
+            if source != target:
+                # 检查是否通过中间节点
+                for middle in agent_names:
+                    if middle != source and middle != target:
+                        # 如果 source->middle 和 middle->target 都有连接
+                        if (adjacency_matrix.loc[source, middle] > 0 and
+                            adjacency_matrix.loc[middle, target] > 0):
+                            betweenness[middle] += 1
+
+    # 归一化介数中心性
+    max_betweenness = max(betweenness.values()) if max(betweenness.values()) > 0 else 1
+    normalized_betweenness = {k: v / max_betweenness for k, v in betweenness.items()}
+
+    # 构建结果DataFrame
+    network_stats = pd.DataFrame({
+        "角色": agent_names,
+        "发言次数": [speech_count[name] for name in agent_names],
+        "入度": [in_degree[name] for name in agent_names],
+        "出度": [out_degree[name] for name in agent_names],
+        "总度数": [total_degree[name] for name in agent_names],
+        "平均入度": [avg_in_degree[name] for name in agent_names],
+        "平均出度": [avg_out_degree[name] for name in agent_names],
+        "度中心性": [round(degree_centrality[name], 3) for name in agent_names],
+        "接近中心性": [round(proximity_scores[name], 3) for name in agent_names],
+        "介数中心性": [round(normalized_betweenness[name], 3) for name in agent_names]
+    })
+
+    return network_stats
+
+
+def export_speech_statistics(speech_stats, total_rounds, experiment_dir):
+    """导出发言统计到Excel"""
+    import pandas as pd
+
+    df = pd.DataFrame(speech_stats)
+    df.loc[len(df)] = ["总计", total_rounds, 100.0]
+
+    filename = os.path.join(experiment_dir, "speech_statistics.xlsx")
+    df.to_excel(filename, index=False, sheet_name="发言统计")
+    return filename
+
+
+def export_interaction_statistics(interaction_stats, total_interactions, experiment_dir):
+    """导出互动统计到Excel"""
+    import pandas as pd
+
+    df = pd.DataFrame(interaction_stats)
+
+    filename = os.path.join(experiment_dir, "interaction_statistics.xlsx")
+    df.to_excel(filename, index=False, sheet_name="互动统计")
+    return filename
+
+
+def export_network_analysis(network_stats, experiment_dir):
+    """导出网络分析到Excel"""
+    filename = os.path.join(experiment_dir, "network_analysis.xlsx")
+    network_stats.to_excel(filename, index=False, sheet_name="网络中心性")
+    return filename
+
+
+def analyze_stage_statistics(group_chat, agents, evaluator):
+    """分析阶段性统计（按角色-分类交叉统计）"""
+    import pandas as pd
+    from dialogue_evaluator import CLASS_HIERARCHY
+
+    # 定义阶段边界（按比例计算）
+    total_rounds = len(group_chat.messages)
+    
+    # 计算各阶段的轮数（如果除不开，中期占比大一些）
+    if total_rounds % 3 == 0:
+        # 能被3整除，均分
+        stage_size = total_rounds // 3
+        early_end = stage_size
+        middle_end = stage_size * 2
+    else:
+        # 不能被3整除，中期多1轮
+        early_size = total_rounds // 3
+        late_size = total_rounds // 3
+        middle_size = total_rounds - early_size - late_size  # 中期多1轮
+        
+        early_end = early_size
+        middle_end = early_size + middle_size
+
+    stages = {
+        "前期": (1, early_end),
+        "中期": (early_end + 1, middle_end),
+        "后期": (middle_end + 1, total_rounds)
+    }
+
+    # 获取所有角色名称
+    role_names = [agent.name for agent in agents]
+
+    # 获取所有分类名称
+    class_names = list(CLASS_HIERARCHY.keys())
+
+    # 为每个阶段创建统计结果
+    stage_results = {}
+
+    for stage_name, (start_round, end_round) in stages.items():
+        # 初始化角色-分类交叉统计矩阵
+        # 行：角色，列：分类
+        cross_stats = {}
+        for role in role_names:
+            cross_stats[role] = {class_name: 0 for class_name in class_names}
+
+        # 统计该阶段的发言
+        stage_messages = []
+        for i, message in enumerate(group_chat.messages):
+            round_num = i + 1
+            if start_round <= round_num <= end_round:
+                stage_messages.append(message)
+
+        # 计算角色-分类交叉统计
+        for msg in stage_messages:
+            role = msg.get("name", "")
+            content = msg.get("content", "")
+            classification = evaluator.evaluate(content)
+
+            if role in cross_stats and classification in cross_stats[role]:
+                cross_stats[role][classification] += 1
+
+        # 转换为DataFrame（角色为行，分类为列）
+        df_data = []
+        for role in role_names:
+            row_data = {"角色": role}
+            row_data.update(cross_stats[role])
+            df_data.append(row_data)
+
+        df = pd.DataFrame(df_data)
+
+        # 添加阶段信息
+        stage_info = {
+            "阶段名称": stage_name,
+            "轮数范围": f"{start_round}-{end_round}",
+            "计划轮数": end_round - start_round + 1,
+            "实际发言数": len(stage_messages)
+        }
+
+        stage_results[stage_name] = {
+            "DataFrame": df,
+            "阶段信息": stage_info
+        }
+
+    return stage_results
+
+
+def export_stage_statistics(stage_results, experiment_dir):
+    """导出阶段性统计到Excel（每个阶段一个sheet，角色-分类交叉统计）"""
+    import pandas as pd
+
+    filename = os.path.join(experiment_dir, "stage_statistics.xlsx")
+
+    # 创建Excel writer
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        for stage_name, stage_data in stage_results.items():
+            # 创建阶段摘要
+            info = stage_data["阶段信息"]
+            summary_data = {
+                "指标": ["阶段名称", "轮数范围", "计划轮数", "实际发言数"],
+                "值": [
+                    info["阶段名称"],
+                    info["轮数范围"],
+                    info["计划轮数"],
+                    info["实际发言数"]
+                ]
+            }
+            summary_df = pd.DataFrame(summary_data)
+
+            # 将摘要和统计表写入同一个sheet
+            # 先写入摘要
+            summary_df.to_excel(writer, sheet_name=stage_name, startrow=0, index=False)
+
+            # 写入角色-分类交叉统计（从第5行开始）
+            cross_df = stage_data["DataFrame"]
+            cross_df.to_excel(writer, sheet_name=stage_name, startrow=5, index=False)
+
+    print(f"[OK] 阶段性统计已导出: {filename}")
+    return filename
+
+
+def export_dialogue_log(group_chat, experiment_dir, topic):
+    """导出对话记录到文本文件"""
+    filename = os.path.join(experiment_dir, "dialogue_log.txt")
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write("=" * 70 + "\n")
+        f.write("对话记录".center(70) + "\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"讨论议题：{topic}\n")
+        f.write(f"总轮数：{len(group_chat.messages)}\n")
+        f.write(f"实验时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 70 + "\n\n")
+
+        for i, message in enumerate(group_chat.messages):
+            role = message.get("name", "Unknown")
+            content = message.get("content", "")
+            f.write(f"[{i+1}] {role}:\n")
+            f.write(f"{content}\n")
+            f.write("-" * 70 + "\n")
+
+    return filename
+
+
+def export_dialogue_records(dialogue_records, total_rounds, experiment_dir, topic):
+    """导出详细发言记录到JSON"""
+    filename = os.path.join(experiment_dir, "dialogue_records.json")
+
+    dialogue_data = {
+        "experiment_info": {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "topic": topic,
+            "total_rounds": total_rounds,
+            "model": os.getenv("OPENAI_MODEL_NAME")
+        },
+        "dialogue_records": dialogue_records
+    }
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(dialogue_data, f, ensure_ascii=False, indent=2)
+
+    return filename
+
+
+def export_experiment_config(group_chat, experiment_dir, topic):
+    """导出实验配置到文本文件"""
+    filename = os.path.join(experiment_dir, "experiment_config.txt")
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write("=" * 70 + "\n")
+        f.write("实验配置".center(70) + "\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"实验时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"讨论轮数：{group_chat.max_round}\n")
+        f.write(f"讨论议题：{topic}\n")
+        f.write(f"参与角色：总结者、支持者、计时者、批判性发问者、务实性发问者、论辩者\n")
+        f.write(f"模型配置：{os.getenv('OPENAI_MODEL_NAME')}\n")
+        f.write("=" * 70 + "\n")
+
+    return filename
+
+
+def export_ena_analysis_data(dialogue_records, topic, experiment_dir):
+    """导出ENA分析数据（所有角色共用一个sheet）"""
+    import pandas as pd
+    from dialogue_evaluator import CLASS_HIERARCHY
+
+    filename = os.path.join(experiment_dir, "ena_analysis_data.xlsx")
+
+    # 准备数据
+    data = []
+
+    # 添加讨论主题行
+    topic_row = {
+        "姓名": "System",
+        "文本": f"讨论主题: {topic}",
+        "分组": "LLM",
+        "非话题性": 0,
+        "提问": 0,
+        "陈述": 1,
+        "支持": 0,
+        "冲突": 0,
+        "澄清": 0,
+        "总结": 0,
+        "评价": 0
+    }
+    data.append(topic_row)
+
+    # 添加每条发言
+    # 中英文分类映射
+    classification_mapping = {
+        "off_topic": "非话题性",
+        "questioning": "提问",
+        "stating": "陈述",
+        "supporting": "支持",
+        "challenging": "冲突",
+        "clarifying": "澄清",
+        "summarizing": "总结",
+        "evaluating": "评价"
+    }
+    
+    for record in dialogue_records:
+        # 创建分类列
+        classification_cols = {
+            "非话题性": 0,
+            "提问": 0,
+            "陈述": 0,
+            "支持": 0,
+            "冲突": 0,
+            "澄清": 0,
+            "总结": 0,
+            "评价": 0
+        }
+
+        # 设置分类标记
+        classification = record.get("classification", "")
+        if classification in classification_mapping:
+            chinese_name = classification_mapping[classification]
+            classification_cols[chinese_name] = 1
+
+        row = {
+            "姓名": record.get("speaker", ""),
+            "文本": record.get("content", ""),
+            "分组": "LLM",
+            **classification_cols
+        }
+        data.append(row)
+
+    # 创建DataFrame
+    df = pd.DataFrame(data)
+
+    # 导出到Excel
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name="ENA_Analysis", index=False)
+
+    print(f"[OK] ENA分析数据已导出: {filename}")
+    return filename
+
+
+def export_preference_analysis_data(dialogue_records, experiment_dir):
+    """导出偏好分析数据（每个角色一个sheet）"""
+    import pandas as pd
+
+    filename = os.path.join(experiment_dir, "preference_analysis_data.xlsx")
+
+    # 按角色分组数据
+    role_data = {}
+    for record in dialogue_records:
+        speaker = record.get("speaker", "")
+        if speaker not in role_data:
+            role_data[speaker] = []
+        role_data[speaker].append(record)
+
+    # 导出到Excel，每个角色一个sheet
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        for role, records in role_data.items():
+            data = []
+            for record in records:
+                row = {
+                    "Timestamp": record.get("timestamp", ""),
+                    "Author": record.get("speaker", ""),
+                    "Category": record.get("classification", "")
+                }
+                data.append(row)
+            df = pd.DataFrame(data)
+            df.to_excel(writer, sheet_name=role, index=False)
+
+    print(f"[OK] 偏好分析数据已导出: {filename}")
+    return filename
+
+
+def run_full_analysis(group_chat, agents, experiment_dir, topic):
+    """运行完整的数据分析流程（主函数）"""
+    print("\n" + "=" * 70)
+    print("开始数据分析...".center(70))
+    print("=" * 70)
+
+    results = {}
+
+    # 1. 发言统计
+    print("1. 分析发言统计...")
+    speech_stats, total_rounds = analyze_speech_statistics(group_chat, agents)
+    results["speech_stats"] = speech_stats
+    results["total_rounds"] = total_rounds
+    print(f"   [OK] 总轮数: {total_rounds}")
+
+    # 2. 互动统计
+    print("2. 分析互动统计...")
+    interaction_stats, total_interactions = analyze_interaction_statistics(group_chat)
+    results["interaction_stats"] = interaction_stats
+    results["total_interactions"] = total_interactions
+    if total_rounds > 0:
+        interaction_density = total_interactions / total_rounds
+        results["interaction_density"] = round(interaction_density, 2)
+        print(f"   [OK] 总互动次数: {total_interactions}, 互动密度: {interaction_density:.2f}次/轮")
+
+    # 3. 对话行为评价（不打印）
+    print("3. 评价对话行为...")
+    evaluator = DialogueEvaluator()
+    stats, dialogue_records = analyze_dialogue_behavior(group_chat, evaluator)
+    results["dialogue_stats"] = stats
+    results["dialogue_records"] = dialogue_records
+    print(f"   [OK] 评价了 {len(dialogue_records)} 条发言")
+
+    # 4. 网络分析（新增）
+    print("4. 分析网络中心性...")
+    network_stats = analyze_network_centrality(group_chat, agents)
+    results["network_stats"] = network_stats
+    print("   [OK] 计算了入度、出度、度中心性、接近中心性、介数中心性")
+
+    # 5. 阶段性统计（新增）
+    print("5. 分析阶段性统计...")
+    stage_results = analyze_stage_statistics(group_chat, agents, evaluator)
+    results["stage_results"] = stage_results
+    print("   [OK] 统计了前期、中期、后期的发言和分类层次")
+
+    # 6. 导出所有数据
+    print("6. 导出数据文件...")
+    files = {}
+
+    files["speech_stats"] = export_speech_statistics(speech_stats, total_rounds, experiment_dir)
+    print(f"   [OK] 发言统计: {files['speech_stats']}")
+
+    files["interaction_stats"] = export_interaction_statistics(interaction_stats, total_interactions, experiment_dir)
+    print(f"   [OK] 互动统计: {files['interaction_stats']}")
+
+    stats.export_to_excel(os.path.join(experiment_dir, "dialogue_statistics.xlsx"))
+    print(f"   [OK] 对话行为统计: dialogue_statistics.xlsx")
+
+    files["network_analysis"] = export_network_analysis(network_stats, experiment_dir)
+    print(f"   [OK] 网络分析: {files['network_analysis']}")
+
+    files["stage_statistics"] = export_stage_statistics(stage_results, experiment_dir)
+    print(f"   [OK] 阶段性统计: {files['stage_statistics']}")
+
+    files["dialogue_records"] = export_dialogue_records(dialogue_records, total_rounds, experiment_dir, topic)
+    print(f"   [OK] 发言记录: {files['dialogue_records']}")
+
+    files["dialogue_log"] = export_dialogue_log(group_chat, experiment_dir, topic)
+    print(f"   [OK] 对话日志: {files['dialogue_log']}")
+
+    files["experiment_config"] = export_experiment_config(group_chat, experiment_dir, topic)
+    print(f"   [OK] 实验配置: {files['experiment_config']}")
+
+    files["ena_analysis_data"] = export_ena_analysis_data(dialogue_records, topic, experiment_dir)
+    print(f"   [OK] ENA分析数据: {files['ena_analysis_data']}")
+
+    files["preference_analysis_data"] = export_preference_analysis_data(dialogue_records, experiment_dir)
+    print(f"   [OK] 偏好分析数据: {files['preference_analysis_data']}")
+
+    print("\n" + "=" * 70)
+    print("数据分析完成！".center(70))
+    print("=" * 70)
+
+    return results, files
+
+
 
 
 # --- 主程序 ---
@@ -416,11 +1450,11 @@ if __name__ == "__main__":
     # 创建智能体
     summarizer, supporter, timer, critical_questioner, practical_questioner, debater, coordinator = create_role_agents(config_list)
 
-    # 创建群聊
+    # 创建群聊（不包含 Coordinator，只包含讨论角色）
     group_chat = RoleDiscussionChat(
-        agents=[summarizer, supporter, timer, critical_questioner, practical_questioner, debater, coordinator],
+        agents=[summarizer, supporter, timer, critical_questioner, practical_questioner, debater],
         messages=[],
-        max_round=20,  # 固定20轮
+        max_round=100,  # 固定100轮
         speaker_selection_method="manual",
         allow_repeat_speaker=False,
     )
@@ -428,7 +1462,7 @@ if __name__ == "__main__":
     # 创建管理器
     manager = GroupChatManager(
         groupchat=group_chat,
-        llm_config={"config_list": config_list, "temperature": 0.5}
+        llm_config={"config_list": config_list, "temperature": 0.5, "timeout": 300}
     )
 
     # 定义讨论议题
@@ -451,10 +1485,18 @@ if __name__ == "__main__":
     print(f"讨论议题：人工智能技术在中小学教育中的应用与挑战")
     print(f"总轮数：{group_chat.max_round}")
     print(f"实验结果路径：{experiment_dir}")
+    print(f"改进特性：阶段性引导、动态权重、互动模式切换、质量检测、动态温度、记忆窗口管理")
     print("=" * 70)
     print()
 
     try:
+        # 初始化所有智能体的温度为前期温度
+        initial_stage = group_chat._get_current_stage(1)
+        for agent in [summarizer, supporter, timer, critical_questioner, practical_questioner, debater]:
+            if isinstance(agent, DynamicTemperatureAgent):
+                agent.set_stage_temperature(initial_stage)
+
+        # 开始讨论
         coordinator.initiate_chat(
             manager,
             message=discussion_topic
@@ -462,139 +1504,9 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n[错误] {e}")
 
-    # 统计
-    print()
-    print("=" * 70)
-    print("讨论数据分析".center(70))
-    print("=" * 70)
-
-    total_rounds = len(group_chat.messages)
-    print(f"\n📊 总轮数: {total_rounds}")
-
-    print(f"\n👥 发言统计：")
-    for agent in [summarizer, supporter, timer, critical_questioner, practical_questioner, debater]:
-        count = sum(1 for m in group_chat.messages if m.get("name") == agent.name)
-        percentage = (count / total_rounds * 100) if total_rounds > 0 else 0
-        print(f"  {agent.name:12} {count:2}次 ({percentage:5.1f}%)")
-
-    # 互动统计
-    group_chat.print_interaction_stats()
-
-    # 计算互动密度
-    total_interactions = sum(group_chat.interaction_matrix.values())
-    print(f"\n💬 总互动次数: {total_interactions}")
-
-    if total_rounds > 0:
-        interaction_density = (total_interactions / total_rounds)
-        print(f"📈 互动密度: {interaction_density:.2f}次/轮")
-
-    # === 对话行为评价 ===
-    print()
-    print("=" * 70)
-    print("对话行为评价".center(70))
-    print("=" * 70)
-    print("\n正在评价每条发言...")
-
-    # 创建评价器
-    evaluator = DialogueEvaluator()
-    stats = DialogueStatistics()
-
-    # 存储详细发言记录
-    dialogue_records = []
-    last_speaker = "Coordinator"  # 初始化上一个发言者为 Coordinator
-
-    # 对每条发言进行评价（跳过 Coordinator 的消息）
-    for i, message in enumerate(group_chat.messages):
-        role = message.get("name", "Unknown")
-        content = message.get("content", "")
-
-        # 跳过 Coordinator
-        if role == "Coordinator":
-            continue
-
-        print(f"[{i+1}/{total_rounds}] 评价 {role} 的发言...")
-        classification = evaluator.evaluate(content)
-        stats.add_speech(role, classification)
-        print(f"  → 分类: {classification}")
-
-        # 记录详细信息，包括回复角色
-        record = {
-            "round": i + 1,
-            "speaker": role,
-            "reply_to": last_speaker,  # 添加回复角色信息
-            "content": content,
-            "classification": classification,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        dialogue_records.append(record)
-
-        # 更新上一个发言者
-        last_speaker = role
-
-    # 打印对话行为统计
-    stats.print_statistics()
-
-    # === 导出统计数据 ===
-    print()
-    print("=" * 70)
-    print("导出统计数据".center(70))
-    print("=" * 70)
-
-    # 导出 Excel 统计文件
-    excel_filename = os.path.join(experiment_dir, "dialogue_statistics.xlsx")
-    stats.export_to_excel(excel_filename)
-
-    # 导出 JSON 格式的详细发言记录
-    json_filename = os.path.join(experiment_dir, "dialogue_records.json")
-    dialogue_data = {
-        "experiment_info": {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "topic": "人工智能技术在中小学教育中的应用与挑战",
-            "total_rounds": total_rounds,
-            "model": os.getenv("OPENAI_MODEL_NAME")
-        },
-        "dialogue_records": dialogue_records
-    }
-
-    with open(json_filename, 'w', encoding='utf-8') as f:
-        json.dump(dialogue_data, f, ensure_ascii=False, indent=2)
-
-    print(f"✅ 详细发言记录已保存到: {json_filename}")
-
-    # 保存对话记录到文本文件
-    dialogue_filename = os.path.join(experiment_dir, "dialogue_log.txt")
-    with open(dialogue_filename, 'w', encoding='utf-8') as f:
-        f.write("=" * 70 + "\n")
-        f.write("对话记录".center(70) + "\n")
-        f.write("=" * 70 + "\n\n")
-        f.write(f"讨论议题：人工智能技术在中小学教育中的应用与挑战\n")
-        f.write(f"总轮数：{total_rounds}\n")
-        f.write(f"实验时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("=" * 70 + "\n\n")
-
-        for i, message in enumerate(group_chat.messages):
-            role = message.get("name", "Unknown")
-            content = message.get("content", "")
-            f.write(f"[{i+1}] {role}:\n")
-            f.write(f"{content}\n")
-            f.write("-" * 70 + "\n")
-
-    print(f"✅ 对话记录已保存到: {dialogue_filename}")
-
-    # 保存实验配置信息
-    config_filename = os.path.join(experiment_dir, "experiment_config.txt")
-    with open(config_filename, 'w', encoding='utf-8') as f:
-        f.write("=" * 70 + "\n")
-        f.write("实验配置".center(70) + "\n")
-        f.write("=" * 70 + "\n\n")
-        f.write(f"实验时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"讨论轮数：{group_chat.max_round}\n")
-        f.write(f"讨论议题：人工智能技术在中小学教育中的应用与挑战\n")
-        f.write(f"参与角色：总结者、支持者、计时者、批判性发问者、务实性发问者、论辩者\n")
-        f.write(f"模型配置：{os.getenv('OPENAI_MODEL_NAME')}\n")
-        f.write("=" * 70 + "\n")
-
-    print(f"✅ 实验配置已保存到: {config_filename}")
+    # === 运行完整数据分析 ===
+    agents_list = [summarizer, supporter, timer, critical_questioner, practical_questioner, debater]
+    results, files = run_full_analysis(group_chat, agents_list, experiment_dir, discussion_topic.strip())
 
     print()
     print("=" * 70)

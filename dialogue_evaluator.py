@@ -320,12 +320,12 @@ class DialogueStatistics:
             import pandas as pd
             df = pd.DataFrame(self.data)
             df.to_excel(filename, index=False, engine='openpyxl')
-            print(f"✅ 统计数据已导出到: {filename}")
+            print(f"[OK] 统计数据已导出到: {filename}")
         except ImportError:
-            print("⚠️  未安装 pandas 或 openpyxl，无法导出 Excel")
+            print("[WARNING] 未安装 pandas 或 openpyxl，无法导出 Excel")
             print("请运行: pip install pandas openpyxl")
         except Exception as e:
-            print(f"❌ 导出 Excel 失败: {e}")
+            print(f"[ERROR] 导出 Excel 失败: {e}")
 
     def print_statistics(self):
         """打印统计数据"""
